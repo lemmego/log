@@ -20,25 +20,25 @@ this package has set the default handler. A second facade would mean two ways
 to log the same thing — and library code calls `slog` whatever an application
 prefers, so half the lines in a log file would come from the one nobody chose.
 
-## Standard library only, and that is a constraint
+## Standard library only
 
 A logging package is the one thing every other package wants to import,
-framework modules included. The moment it requires a web framework for an
-`app.Provider`, two things break at once:
+framework modules included. If it needed a web framework for an
+`app.Provider`, two things would break at once:
 
-- **A consumer inherits the whole framework's dependency tree.** Measured
-  before this was split: **289 modules** in the build list, 156 of them cloud
-  SDKs, OpenTelemetry and gRPC, for a package whose job is formatting text.
-  Module graph pruning does not help — the requirements are in `go.mod`
-  whether or not anything imports them. It is 2 now.
-- **`api` could never log through this**, because `api → log → api` is a
-  cycle. That is the direction that should exist: the framework should use
-  the logger.
+- **You would inherit the whole framework's dependency tree** for a package
+  whose job is formatting text — around 289 modules, 156 of them cloud SDKs,
+  OpenTelemetry and gRPC. Module graph pruning does not help, because the
+  requirements are in `go.mod` whether or not anything imports them. This
+  module's build list is 2.
+- **`api` could never log through it**, because `api → log → api` is a cycle,
+  and that is the direction that should exist: the framework should use the
+  logger.
 
-So lifecycle wiring lives outside this module. It is about twenty lines —
-read configuration, honour "running in console", call `SetDefault` once — and
-it is the only part that has to know what an application is. There is a
-worked example in `productshore/internal/plugins/logging.go`.
+So the lifecycle wiring lives outside this module, in `api/logger`. You do not
+need to write it — register `&logger.Provider{}` and set the `LOG_*`
+variables. It is about twenty lines if you ever want your own: read
+configuration, honour "running in console", call `SetDefault` once.
 
 ## Install
 
@@ -67,7 +67,7 @@ filesystem has a log nobody will read; and a deployment whose only log is
 stdio has nothing to grep next week. Both is the answer that works in both
 places.
 
-The two halves use **different formats on purpose**: a file is read by a
+The two halves use **different formats**, because a file is read by a
 machine — `grep`, `jq`, whatever collects it — and a console is read by a
 person. One format cannot be the best of both, so neither half compromises.
 
@@ -102,7 +102,7 @@ command, where info chatter buries the output somebody ran the command for —
 and the improvement on simply silencing the logger is that a command which
 fails overnight still leaves a record.
 
-## Colour is detected, not assumed
+## Colour
 
 ```go
 log.Colour(w)   // is this writer a terminal?
