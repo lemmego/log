@@ -140,6 +140,20 @@ type Options struct {
 	// improvement on simply silencing the logger: a command that fails
 	// overnight leaves a record.
 	Quiet bool
+
+	// Extra are handlers that receive every record alongside the channel's
+	// own, for something that wants the log rather than writes it — a
+	// recorder, a metrics counter, a test double.
+	//
+	// They are folded in for every channel, not only stack. There is no other
+	// way to add one: Logger.Handler is read-only, and wrapping it afterwards
+	// with a second slog.SetDefault would break the single-owner rule that
+	// this package and api/logger are both built on.
+	//
+	// An Extra handler is held to the same contract as any other: Handle is
+	// given a cloned record, so retaining its attrs past the call means
+	// copying them out. See Fanout.
+	Extra []slog.Handler
 }
 
 // Logger is a configured slog.Logger plus whatever has to be closed.
@@ -248,6 +262,12 @@ func New(opts Options) (*Logger, error) {
 				}, ", "))
 		}()
 		logger.handler = logger.console(opts, level)
+	}
+
+	// Folded in last, so an Extra handler sees exactly what the channel
+	// does. Fanout drops nil members, so a caller need not filter.
+	if len(opts.Extra) > 0 {
+		logger.handler = NewFanout(append([]slog.Handler{logger.handler}, opts.Extra...)...)
 	}
 
 	logger.Logger = slog.New(logger.handler)

@@ -3,6 +3,7 @@ package log
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -316,5 +317,125 @@ func TestTheZeroOptionsWork(t *testing.T) {
 	}
 	if logger.Handler() == nil {
 		t.Fatal("no handler")
+	}
+}
+
+// capturing is a handler that keeps what it is given.
+type capturing struct {
+	mu      sync.Mutex
+	records []slog.Record
+	attrs   [][]slog.Attr
+}
+
+func (c *capturing) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *capturing) Handle(_ context.Context, record slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, record)
+
+	// Copied out rather than retained. Record.Attrs is single-pass over a
+	// shared backing array, which is why Fanout clones per handler — a
+	// handler that holds the record and iterates later races with whoever
+	// else was given it.
+	var attrs []slog.Attr
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs = append(attrs, attr)
+		return true
+	})
+	c.attrs = append(c.attrs, attrs)
+	return nil
+}
+
+func (c *capturing) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *capturing) WithGroup(string) slog.Handler      { return c }
+
+func (c *capturing) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.records)
+}
+
+// TestExtraHandlersReceiveEveryChannel.
+//
+// Only ChannelStack built a Fanout before, so there was nowhere to add a
+// handler on the channels most deployments actually use — and a consumer
+// would have reached around with a second slog.SetDefault, which breaks the
+// single-owner rule this package and api/logger are both built on.
+func TestExtraHandlersReceiveEveryChannel(t *testing.T) {
+	for _, channel := range []string{
+		ChannelConsole, ChannelJSON, ChannelFile, ChannelStack,
+	} {
+		t.Run(channel, func(t *testing.T) {
+			extra := &capturing{}
+			logger, err := New(Options{
+				Channel: channel,
+				Level:   "debug",
+				Path:    filepath.Join(t.TempDir(), "app.log"),
+				Console: io.Discard,
+				Extra:   []slog.Handler{extra},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = logger.Close() })
+
+			logger.Info("hello", "who", "world")
+
+			if got := extra.count(); got != 1 {
+				t.Errorf("the extra handler received %d records on channel %s, want 1",
+					got, channel)
+			}
+		})
+	}
+}
+
+// TestExtraHandlersDoNotReplaceTheChannel, because a recorder that silently
+// swallowed the log file would be the worst possible trade.
+func TestExtraHandlersDoNotReplaceTheChannel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	extra := &capturing{}
+
+	logger, err := New(Options{
+		Channel: ChannelFile,
+		Level:   "debug",
+		Path:    path,
+		Extra:   []slog.Handler{extra},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("written to both")
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the log file: %v", err)
+	}
+	if !strings.Contains(string(contents), "written to both") {
+		t.Error("the record did not reach the file; an extra handler replaced " +
+			"the channel rather than joining it")
+	}
+	if extra.count() != 1 {
+		t.Error("the record did not reach the extra handler")
+	}
+}
+
+// TestNoExtraHandlersLeavesTheHandlerAlone, so the common case gains no
+// wrapper and no allocation.
+func TestNoExtraHandlersLeavesTheHandlerAlone(t *testing.T) {
+	logger, err := New(Options{
+		Channel: ChannelConsole,
+		Console: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	if _, wrapped := logger.Handler().(*Fanout); wrapped {
+		t.Error("the console channel was wrapped in a Fanout with no extra handlers")
 	}
 }
