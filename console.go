@@ -62,6 +62,13 @@ type ConsoleHandler struct {
 	out   io.Writer
 	level slog.Leveler
 
+	// maxLevel is an exclusive upper bound, nil meaning none. It exists so
+	// that two handlers can divide the levels between two streams — info and
+	// below to stdout, warn and above to stderr — which is what a platform
+	// that reads stderr as "this is an error" needs. A minimum alone cannot
+	// express the lower half.
+	maxLevel slog.Leveler
+
 	colour bool
 	source bool
 
@@ -81,6 +88,9 @@ type ConsoleOptions struct {
 	Source bool
 	// Colour overrides the terminal detection. Nil means detect.
 	Colour *bool
+	// MaxLevel is an exclusive upper bound on what this handler writes, nil
+	// meaning unbounded. Paired with Level it gives a half-open range.
+	MaxLevel slog.Leveler
 }
 
 // NewConsoleHandler returns a handler writing to w.
@@ -98,16 +108,20 @@ func NewConsoleHandler(w io.Writer, opts ConsoleOptions) *ConsoleHandler {
 	}
 
 	return &ConsoleHandler{
-		mu:     &sync.Mutex{},
-		out:    w,
-		level:  opts.Level,
-		colour: colour,
-		source: opts.Source,
+		mu:       &sync.Mutex{},
+		out:      w,
+		level:    opts.Level,
+		maxLevel: opts.MaxLevel,
+		colour:   colour,
+		source:   opts.Source,
 	}
 }
 
 func (h *ConsoleHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= h.level.Level()
+	if level < h.level.Level() {
+		return false
+	}
+	return h.maxLevel == nil || level < h.maxLevel.Level()
 }
 
 // WithAttrs returns a handler with these attributes on every record.

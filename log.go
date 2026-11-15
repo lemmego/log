@@ -133,6 +133,20 @@ type Options struct {
 	// useful.
 	Console io.Writer
 
+	// SplitStreams sends warn and above to stderr and everything below it to
+	// stdout, instead of putting the whole console channel on stderr.
+	//
+	// Off by default, because for a CLI command the default is right: logs
+	// on stderr are what keep `cmd > out.txt` useful. For a long-running
+	// server there is no command output to protect, and a platform that
+	// classifies stderr as an error — Railway, Cloud Run, Heroku — otherwise
+	// reports every info and debug line as an error, which makes severity
+	// filtering useless exactly when somebody is hunting a real one.
+	//
+	// Ignored when Console is set, since that names one writer and splitting
+	// it in two would quietly disregard the caller's choice.
+	SplitStreams bool
+
 	// Quiet raises the console to warn while leaving the file alone.
 	//
 	// For a CLI command, where info-level chatter buries the output somebody
@@ -281,10 +295,13 @@ func (l *Logger) consoleWriter(opts Options) io.Writer {
 	return os.Stderr
 }
 
-// console builds the console half, applying Quiet.
+// console builds the console half, applying Quiet and SplitStreams.
 func (l *Logger) console(opts Options, level slog.Level) slog.Handler {
 	if opts.Quiet && level < slog.LevelWarn {
 		level = slog.LevelWarn
+	}
+	if opts.SplitStreams && opts.Console == nil {
+		return l.splitConsole(opts, level)
 	}
 	return NewConsoleHandler(l.consoleWriter(opts), ConsoleOptions{
 		Level:  level,
@@ -329,3 +346,47 @@ func (l *Logger) file(opts Options, level slog.Level) (slog.Handler, error) {
 // places setting the default means the winner depends on initialisation
 // order, and the loser's configuration is silently discarded.
 func SetDefault(logger *Logger) { slog.SetDefault(logger.Logger) }
+
+// stdoutStream and stderrStream are the streams splitConsole divides the
+// console between. They are variables so a test can observe the split; nothing
+// outside this package may reassign them.
+var (
+	stdoutStream io.Writer = os.Stdout
+	stderrStream io.Writer = os.Stderr
+)
+
+// splitConsole divides the console between the two standard streams: warn and
+// above to stderr, everything below to stdout.
+//
+// Two handlers in a Fanout rather than one handler over a level-routing
+// writer, because the colour decision is made per writer — Colour(w) asks
+// whether that particular stream is a terminal, and a pipe on one of them
+// should not put escape sequences into the other.
+func (l *Logger) splitConsole(opts Options, level slog.Level) slog.Handler {
+	warn := slog.LevelWarn
+
+	// Quiet, or a configured floor at warn or above, leaves the lower half
+	// with nothing to write. Return the stderr handler alone rather than a
+	// Fanout over a handler that can never be Enabled.
+	if level >= warn {
+		return NewConsoleHandler(stderrStream, ConsoleOptions{
+			Level:  level,
+			Source: opts.Source,
+			Colour: opts.Colour,
+		})
+	}
+
+	return NewFanout(
+		NewConsoleHandler(stdoutStream, ConsoleOptions{
+			Level:    level,
+			MaxLevel: warn,
+			Source:   opts.Source,
+			Colour:   opts.Colour,
+		}),
+		NewConsoleHandler(stderrStream, ConsoleOptions{
+			Level:  warn,
+			Source: opts.Source,
+			Colour: opts.Colour,
+		}),
+	)
+}
